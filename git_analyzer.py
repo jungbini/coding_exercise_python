@@ -3,7 +3,6 @@ import pandas as pd
 import time
 import re
 import os
-import subprocess
 import difflib
 from datetime import datetime, timedelta
 
@@ -88,41 +87,42 @@ def fetch_loc(repo_owner, repo_name, branch, filename, headers):
     except:
         return None
 
-def format_dart_code(code_string: str) -> str:
-    # Get the directory of the current Python script
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+def format_python_code(code_string: str) -> str:
+    """Python 코드를 표준 스타일로 일괄 포맷팅합니다.
 
-    # Path to dart.exe, assuming 'dart-sdk' is a subfolder in your project
-    dart_exe_path = os.path.join(script_dir, "dart-sdk", "bin", "dart.exe")
+    우선 isort로 import를 정렬하고, 그 다음 black으로 코드 스타일을 맞춥니다.
+    (환경에 isort/black이 없으면 원본 코드를 그대로 반환합니다.)
+    """
+    formatted = code_string
 
-    if not os.path.exists(dart_exe_path):
-        print(f"❌ Could not find dart.exe at: {dart_exe_path}. Please place the 'dart-sdk' folder inside your project directory.")
-        return code_string
-
+    # 1) isort
     try:
-        result = subprocess.run(
-            [dart_exe_path, 'format'],
-            input=code_string.encode('utf-8'),
-            capture_output=True,
-            check=True
+        import isort  # type: ignore
+
+        formatted = isort.code(formatted)
+    except Exception:
+        pass
+
+    # 2) black
+    try:
+        import black  # type: ignore
+
+        formatted = black.format_file_contents(
+            formatted, fast=False, mode=black.FileMode()
         )
-        return result.stdout.decode('utf-8')
-    except subprocess.CalledProcessError as e:
-        return code_string
-    except FileNotFoundError:
-        print(f"❌ Failed to run dart.exe. Check if the file permissions are correct.")
-        return code_string
-    except Exception as e:
-        print(e)
+    except Exception:
+        pass
+
+    return formatted
 
 
 def calculate_similarity(local_code: str, remote_code: str) -> float:
     """
-        포맷팅된 Dart 코드의 유사도를 계산합니다.
+        포맷팅된 Python 코드의 유사도를 계산합니다.
         """
     # 1. 비교할 두 코드를 먼저 포맷팅합니다.
-    formatted_local_code = format_dart_code(local_code)
-    formatted_remote_code = format_dart_code(remote_code)
+    formatted_local_code = format_python_code(local_code)
+    formatted_remote_code = format_python_code(remote_code)
 
     # 2. 포맷팅된 코드를 SequenceMatcher로 비교합니다.
     matcher = difflib.SequenceMatcher(None, formatted_local_code, formatted_remote_code)
@@ -131,8 +131,25 @@ def calculate_similarity(local_code: str, remote_code: str) -> float:
     return round(matcher.ratio() * 100, 2)
 
 
-def fetch_similarity(repo_owner, repo_name, branch, filename, headers, local_base_dir="lib"):
-    local_path = os.path.join(local_base_dir, filename[len("lib/"):])
+def fetch_similarity(
+    repo_owner,
+    repo_name,
+    branch,
+    filename,
+    headers,
+    local_base_dir=".",
+    directory_prefix="",
+):
+    """로컬 코드와 GitHub raw 코드(동일 파일)의 유사도를 계산합니다.
+
+    - directory_prefix: GitHub 상의 경로 prefix(예: "lib/")를 로컬 경로에서 제거할 때 사용
+    - local_base_dir: 로컬에서 repo를 둔 기준 디렉토리
+    """
+    rel_path = filename
+    if directory_prefix and rel_path.startswith(directory_prefix):
+        rel_path = rel_path[len(directory_prefix) :]
+
+    local_path = os.path.join(local_base_dir, rel_path.lstrip("/"))
     if not os.path.exists(local_path):
         return None
     try:
@@ -164,10 +181,17 @@ def load_week_range(file_path="week_information.txt"):
         return label, start, end
 
 
-def analyze_commits(github_url, token, username, directory="lib/", branch="main", start_date=None, end_date=None,
+def analyze_commits(github_url, token, username, directory="", branch="main", start_date=None, end_date=None,
                     exclude_first_commit=False, user_actual_name=None):
-    repo_owner, repo_name = extract_repo_info(github_url)
+    repo_owner, repo_name = extract_repo_info(github_url, token)
     week_label, start_filter, end_filter = load_week_range()
+
+    github_directory = ""
+
+    if not directory:
+        directory = week_label
+        if directory and not directory.endswith("/"):
+            directory += "/"
 
     base_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/commits"
     headers = {
@@ -180,16 +204,16 @@ def analyze_commits(github_url, token, username, directory="lib/", branch="main"
         "per_page": 100,
         "author": username
     }
-    raw_data = _fetch_commits(base_url, headers, params, directory, start_filter, end_filter, username)
+    raw_data = _fetch_commits(base_url, headers, params, github_directory, start_filter, end_filter, username)
 
     # 2차 시도: 1차 시도에서 결과가 없으면 전체 커밋을 가져와 commit author 이름으로 필터링
     if not raw_data:
         print(f"⚠️ GitHub username '{username}'으로 커밋을 찾을 수 없습니다. Git commit author 이름으로 재시도합니다.")
         params = {"per_page": 100}  # author 필터 제거
-        raw_data = _fetch_commits(base_url, headers, params, directory, start_filter, end_filter, username)
+        raw_data = _fetch_commits(base_url, headers, params, github_directory, start_filter, end_filter, username)
 
     if not raw_data:
-        print(f"⚠️ No commits found in directory '{directory}' for user '{username}' in selected week.")
+        print(f"⚠️ No commits found in directory '{github_directory}' for user '{username}' in selected week.")
         return pd.DataFrame()
 
     df = pd.DataFrame(raw_data)
@@ -225,7 +249,12 @@ def analyze_commits(github_url, token, username, directory="lib/", branch="main"
     summary["loc"] = summary["loc"].astype(int)
 
     summary["code_similarity"] = summary["filename"].apply(
-        lambda f: fetch_similarity(repo_owner, repo_name, branch, f, headers))
+        lambda f: fetch_similarity(
+            repo_owner, repo_name, branch, f, headers,
+            local_base_dir=week_label,  # ✅ 로컬은 week01 폴더 기준
+            directory_prefix=github_directory  # ✅ GitHub는 루트라 prefix 제거 없음("")
+        )
+    )
     summary["date"] = pd.to_datetime(summary["date"]).dt.strftime("%Y-%m-%d %H:%M")
     summary["result"] = summary["commit_count"].apply(calculate_result)
 
@@ -321,8 +350,8 @@ def _fetch_commits(base_url, headers, params, directory, start_filter, end_filte
                 filepath = f["filename"]
                 status = f.get("status", "")
 
-                # dart 파일만 분석하도록 조건 추가
-                if filepath.startswith(directory) and filepath.endswith(".dart") and status != "removed":
+                # Python 파일만 분석하도록 조건 추가
+                if filepath.startswith(directory) and filepath.endswith(".py") and status != "removed":
                     raw_data.append({
                         "user": username,
                         "date": date,

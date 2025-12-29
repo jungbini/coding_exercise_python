@@ -24,7 +24,7 @@ def analyze_multiple_users(account_file, branch="main"):
             print(f"🔍 분석 중: {actual_name} ({github_url})")
 
             # 실제 이름을 analyze_commits 함수로 전달
-            df = analyze_commits(github_url, token, username, directory="lib/", exclude_first_commit=True,
+            df = analyze_commits(github_url, token, username, directory="", exclude_first_commit=True,
                                  user_actual_name=actual_name)
 
             if not df.empty:
