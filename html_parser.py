@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 import re
-import os
 from git_analyzer import load_week_range
 
 
